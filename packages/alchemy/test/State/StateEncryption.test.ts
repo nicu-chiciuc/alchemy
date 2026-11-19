@@ -242,6 +242,20 @@ describe("sealing codec", { tags: ["unit", "local"] }, () => {
     expect(Exit.isFailure(exit)).toBe(true);
   });
 
+  // StateEncryption.ts sealSecret: no associated data, so a sealed value opens
+  // in whichever field holds it.
+  test("a sealed secret moved to another field fails to decode", async () => {
+    const { keyring } = memoryKeyring();
+    const codec = makeSealingCodec(keyring);
+    const text = await run(codec.encode(scope, { name: "db", password: Redacted.make("hunter2") }));
+    const header = text.slice(0, text.indexOf("\n") + 1);
+    const body: { name: unknown; password: unknown } = JSON.parse(text.slice(header.length));
+    // Someone with write access, and no key, puts the sealed password in `name`.
+    const moved = header + JSON.stringify({ ...body, name: body.password });
+    const exit = await Effect.runPromiseExit(codec.decode(scope, moved, "record"));
+    expect(Exit.isFailure(exit)).toBe(true);
+  });
+
   test("the plain codec refuses sealed records", async () => {
     const { keyring } = memoryKeyring();
     const text = await run(makeSealingCodec(keyring).encode(scope, record));
