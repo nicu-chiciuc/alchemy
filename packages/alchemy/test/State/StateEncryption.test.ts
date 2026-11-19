@@ -448,6 +448,35 @@ describe("BucketState with a sealing codec", { tags: ["unit", "local"] }, () => 
     );
     expect(read).toMatchObject({ attr: { password: Redacted.make("hunter2") } });
   });
+
+  // StateEncryption.ts sealSecret: AES-GCM with no associated data, under one
+  // data key per stage, so a ciphertext opens wherever that key does.
+  test("a record's sealed secret does not open as another record's", async () => {
+    const { objects, bucket } = memoryObjects();
+    const { keyring } = memoryKeyring();
+    await inBucketStore(bucket, keyring, (state) =>
+      Effect.gen(function* () {
+        yield* state.set({ ...scope, fqn: "Secret", value: withSecret("secret-of-Secret") });
+        yield* state.set({ ...scope, fqn: "Token", value: withSecret("secret-of-Token") });
+      }),
+    );
+    // Someone with write access copies Token's stored text over Secret's.
+    objects.set("app/prod/Secret.json", objects.get("app/prod/Token.json")!);
+
+    const exit = await Effect.runPromiseExit(
+      Effect.tryPromise(() =>
+        inBucketStore(bucket, keyring, (state) => state.get({ ...scope, fqn: "Secret" })),
+      ),
+    );
+    expect(
+      Exit.isSuccess(exit)
+        ? Redacted.value(
+            (exit.value as unknown as { attr: { password: Redacted.Redacted<string> } }).attr
+              .password,
+          )
+        : "refused",
+    ).toBe("refused");
+  });
 });
 
 describe("turning encryption off", { tags: ["unit", "local"] }, () => {
