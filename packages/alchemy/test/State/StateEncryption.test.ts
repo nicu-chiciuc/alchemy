@@ -567,6 +567,74 @@ describe("store format record", { tags: ["unit", "local"] }, () => {
     });
   });
 
+  /** `bucket`, failing the next operation on the format record once. */
+  const failingOnce = (bucket: BucketObjects, operation: "read" | "write"): BucketObjects => {
+    let failures = 1;
+    const fails = (key: string) => key === STORE_FORMAT_FILE && failures-- > 0;
+    const failure = (key: string) =>
+      Effect.fail(new StateStoreError({ message: `transient ${operation} failure of ${key}` }));
+    return {
+      ...bucket,
+      read: (key) =>
+        Effect.suspend(() =>
+          operation === "read" && fails(key) ? failure(key) : bucket.read(key),
+        ),
+      write: (key, text, condition) =>
+        Effect.suspend(() =>
+          operation === "write" && fails(key) ? failure(key) : bucket.write(key, text, condition),
+        ),
+    };
+  };
+
+  // BucketState.ts makeBucketState: `objects` checks the format inside
+  // Effect.cached, which keeps a failure as well as a success.
+  test("a failed format read is retried by the next operation", async () => {
+    const { bucket } = memoryObjects();
+    const stacks = await Effect.runPromise(
+      makeBucketState({
+        id: "memory",
+        label: "memory",
+        objects: Effect.succeed(failingOnce(bucket, "read")),
+      }).pipe(
+        Effect.flatMap((state) =>
+          Effect.gen(function* () {
+            const first = yield* Effect.flip(state.listStacks());
+            expect(first.message).toBe(`transient read failure of ${STORE_FORMAT_FILE}`);
+            return yield* state.listStacks();
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(SecureRandom.layerWebCrypto),
+      ),
+    );
+    expect(stacks).toEqual([]);
+  });
+
+  // BucketState.ts makeBucketState: `stampFormat` is the same Effect.cached.
+  test("a failed format write is retried by the next write", async () => {
+    const { objects, bucket } = memoryObjects();
+    await Effect.runPromise(
+      makeBucketState({
+        id: "memory",
+        label: "memory",
+        objects: Effect.succeed(failingOnce(bucket, "write")),
+      }).pipe(
+        Effect.flatMap((state) =>
+          Effect.gen(function* () {
+            const first = yield* Effect.flip(state.setOutput({ ...scope, value: { url: "u" } }));
+            expect(first.message).toBe(`transient write failure of ${STORE_FORMAT_FILE}`);
+            yield* state.setOutput({ ...scope, value: { url: "u" } });
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(SecureRandom.layerWebCrypto),
+      ),
+    );
+    expect(JSON.parse(objects.get(STORE_FORMAT_FILE)!.text)).toEqual({
+      format: STATE_STORE_FORMAT,
+    });
+  });
+
   test("a store in a newer format is refused", async () => {
     const { objects, bucket } = memoryObjects();
     objects.set(STORE_FORMAT_FILE, {
